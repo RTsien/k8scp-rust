@@ -35,13 +35,11 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let kubeconfig = fs::read_to_string(args.kubeconfig)?;
-
+    // kube client
     tracing_subscriber::fmt::init();
-    // let client = Client::try_default().await?;
     let client = Client::try_from(
         Config::from_custom_kubeconfig(
-            Kubeconfig::from_yaml(kubeconfig.as_str())?,
+            Kubeconfig::from_yaml(fs::read_to_string(&args.kubeconfig)?.as_str())?,
             &KubeConfigOptions {
                 context: None,
                 cluster: None,
@@ -51,11 +49,8 @@ async fn main() -> anyhow::Result<()> {
         .await?,
     )?;
 
+    // pod exec
     let pods: Api<Pod> = Api::namespaced(client, args.namespace.as_str());
-    // Stop on error including a pod already exists or is still being deleted.
-    // pods.create(&PostParams::default(), &p).await?;
-
-    // Do an interactive exec to a blog pod with the `sh` command
     let mut ap = AttachParams::interactive_tty().tty(args.tty);
     if args.container.len() > 0 {
         ap = ap.container(args.container);
