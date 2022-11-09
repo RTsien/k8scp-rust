@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
     // process bar
     let pb = Arc::new(ProgressBar::new(f_reader.total));
     pb.set_style(ProgressStyle::with_template(
-        "{msg} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        "{msg} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({binary_bytes_per_sec}, {eta})")
         .unwrap()
         .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
         .progress_chars("#>-"));
@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let exec = format!(
-        "mkdir -p {} && cd {} && cat > {} && ",
+        "mkdir -p {} && cd {} && cat > {}",
         args.dst,
         args.dst,
         Path::new(&args.src).file_name().unwrap().to_str().unwrap()
