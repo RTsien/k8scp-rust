@@ -18,9 +18,8 @@ use kube::{
     config::{KubeConfigOptions, Kubeconfig},
     Client, Config,
 };
-use tokio::io::{ReadBuf, AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::*;
-
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
