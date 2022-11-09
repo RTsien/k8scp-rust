@@ -1,8 +1,16 @@
-use std::time::Duration;
-use std::{cmp::min, fmt::Write};
-use std::{fs, thread};
+use std::{
+    fmt::Write,
+    fs,
+    io::Error,
+    ops::DerefMut,
+    path::Path,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use clap::Parser;
+use futures::lock::Mutex;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
@@ -10,7 +18,9 @@ use kube::{
     config::{KubeConfigOptions, Kubeconfig},
     Client, Config,
 };
+use tokio::io::{ReadBuf, AsyncRead, AsyncWrite};
 use tracing::*;
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -28,12 +38,91 @@ struct Args {
     container: String,
 
     #[arg(short, long)]
-    tty: bool,
+    src: String,
+
+    #[arg(short, long)]
+    dst: String,
+}
+
+struct FileProcessReader {
+    file: tokio::fs::File,
+    cur: u64,
+    total: u64,
+    pb: Option<Arc<ProgressBar>>,
+}
+
+impl FileProcessReader {
+    async fn new(file_path: &str) -> FileProcessReader {
+        FileProcessReader {
+            file: tokio::fs::File::open(file_path).await.unwrap(),
+            cur: 0,
+            total: tokio::fs::metadata(file_path).await.unwrap().len(),
+            pb: None,
+        }
+    }
+}
+
+impl AsyncRead for FileProcessReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let ret = Pin::new(&mut self.file).poll_read(cx, buf);
+        match ret {
+            Poll::Ready(Ok(())) => {
+                self.cur = self.cur + buf.filled().len() as u64;
+                match self.pb.as_ref() {
+                    Some(pb) => pb.set_position(self.cur),
+                    _ => (),
+                }
+            }
+            _ => {}
+        }
+        ret
+    }
+}
+
+#[derive(Debug)]
+struct StringWriter {
+    str: String,
+}
+
+impl AsyncWrite for StringWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, Error>> {
+        self.str
+            .push_str(std::str::from_utf8(buf).unwrap_or("[not utf8]"));
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // src file
+    let mut f_reader = FileProcessReader::new(args.src.as_str()).await;
+
+    // process bar
+    let pb = Arc::new(ProgressBar::new(f_reader.total));
+    pb.set_style(ProgressStyle::with_template(
+        "{msg} {spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .unwrap()
+        .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+        .progress_chars("#>-"));
+    f_reader.pb = Some(pb.clone());
 
     // kube client
     tracing_subscriber::fmt::init();
@@ -51,35 +140,61 @@ async fn main() -> anyhow::Result<()> {
 
     // pod exec
     let pods: Api<Pod> = Api::namespaced(client, args.namespace.as_str());
-    let mut ap = AttachParams::interactive_tty().tty(args.tty);
+    let mut ap = AttachParams::default().stdin(true);
     if args.container.len() > 0 {
         ap = ap.container(args.container);
     }
-    let mut attached = pods.exec(args.pod.as_str(), vec!["bash"], &ap).await?;
+
+    let exec = format!(
+        "mkdir -p {} && cd {} && cat > {} && ",
+        args.dst,
+        args.dst,
+        Path::new(&args.src).file_name().unwrap().to_str().unwrap()
+    );
+
+    let mut attached = pods
+        .exec(args.pod.as_str(), vec!["sh", "-c", exec.as_str()], &ap)
+        .await?;
 
     // The received streams from `AttachedProcess`
     let mut stdin_writer = attached.stdin().unwrap();
     let mut stdout_reader = attached.stdout().unwrap();
+    let mut stderr_reader = attached.stderr().unwrap();
 
-    // > For interactive uses, it is recommended to spawn a thread dedicated to user input and use blocking IO directly in that thread.
-    // > https://docs.rs/tokio/0.2.24/tokio/io/fn.stdin.html
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    // pipe current stdin to the stdin writer from ws
+    // stdin
     tokio::spawn(async move {
-        tokio::io::copy(&mut stdin, &mut stdin_writer)
+        tokio::io::copy(&mut f_reader, &mut stdin_writer)
             .await
             .unwrap();
     });
-    // pipe stdout from ws to current stdout
+
+    // stdout
+    let stdout = Arc::new(Mutex::new(StringWriter { str: String::new() }));
+    let out = stdout.clone();
     tokio::spawn(async move {
-        tokio::io::copy(&mut stdout_reader, &mut stdout)
+        tokio::io::copy(&mut stdout_reader, out.lock().await.deref_mut())
             .await
             .unwrap();
     });
-    // When done, type `exit\n` to end it, so the pod is deleted.
-    let status = attached.take_status().unwrap().await;
-    info!("{}", status.unwrap().status.unwrap());
+
+    // stderr
+    let stderr = Arc::new(Mutex::new(StringWriter { str: String::new() }));
+    let err = stderr.clone();
+    tokio::spawn(async move {
+        tokio::io::copy(&mut stderr_reader, err.lock().await.deref_mut())
+            .await
+            .unwrap();
+    });
+
+    attached.take_status().unwrap().await;
+    pb.abandon();
+
+    if !stdout.lock().await.str.is_empty() {
+        info!("stdout:{}", stdout.lock().await.str);
+    }
+    if !stderr.lock().await.str.is_empty() {
+        info!("stderr:{}", stderr.lock().await.str);
+    }
 
     Ok(())
 }
