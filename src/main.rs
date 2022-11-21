@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
     // pod exec
     let pods: Api<Pod> = Api::namespaced(client, args.namespace.as_str());
     let mut ap = AttachParams::default().stdin(true);
-    if args.container.len() > 0 {
+    if !args.container.is_empty() {
         ap = ap.container(args.container);
     }
 
