@@ -9,7 +9,7 @@ edition = "2021"
 clap = { version = "4.0.18", features = ["derive"] }
 indicatif = "0.17.1"
 kube = { version = "0.76.0", features = ["runtime", "derive", "ws"] }
-k8s-openapi = { version = "0.16.0", features = ["v1_18"] }
+k8s-openapi = { version = "0.16.0", features = ["v1_20"] }
 tokio = { version = "1.14.0", features = ["full"] }
 serde_json = "1.0.87"
 tracing = "0.1.37"

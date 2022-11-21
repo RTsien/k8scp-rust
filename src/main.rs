@@ -68,15 +68,11 @@ impl AsyncRead for FileProcessReader {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let ret = Pin::new(&mut self.file).poll_read(cx, buf);
-        match ret {
-            Poll::Ready(Ok(())) => {
-                self.cur = self.cur + buf.filled().len() as u64;
-                match self.pb.as_ref() {
-                    Some(pb) => pb.set_position(self.cur),
-                    _ => (),
-                }
+        if let Poll::Ready(Ok(())) = ret {
+            self.cur += buf.filled().len() as u64;
+            if let Some(pb) = self.pb.as_ref() {
+                pb.set_position(self.cur)
             }
-            _ => {}
         }
         ret
     }
